@@ -2936,11 +2936,19 @@ elif mode == "Loan Pricing Optimization":
                 st.success(f"Loaded {len(uploaded_df)} rows.")
                 st.dataframe(uploaded_df.head(10), use_container_width=True)
 
-                # Detect columns
-                possible_apr = [c for c in uploaded_df.columns if "apr" in c.lower() or "rate" in c.lower() or "price" in c.lower()]
-                possible_accept = [c for c in uploaded_df.columns if "accept" in c.lower() or "response" in c.lower() or "buy" in c.lower()]
-                apr_col_name = st.selectbox("APR column", possible_apr if possible_apr else list(uploaded_df.columns), key="nomis_apr_col")
-                accept_col_name = st.selectbox("Accept (0/1) column", possible_accept if possible_accept else list(uploaded_df.columns), key="nomis_acc_col")
+                # Detect columns — prefer exact "APR" match
+                all_cols = list(uploaded_df.columns)
+                if "APR" in all_cols:
+                    apr_default_idx = 0
+                    possible_apr = ["APR"] + [c for c in all_cols if c != "APR"]
+                else:
+                    possible_apr = [c for c in all_cols if "apr" in c.lower()]
+                    if not possible_apr:
+                        possible_apr = all_cols
+                    apr_default_idx = 0
+                possible_accept = [c for c in all_cols if "accept" in c.lower() or "response" in c.lower() or "buy" in c.lower()]
+                apr_col_name = st.selectbox("APR column", possible_apr, index=apr_default_idx, key="nomis_apr_col")
+                accept_col_name = st.selectbox("Accept (0/1) column", possible_accept if possible_accept else all_cols, key="nomis_acc_col")
             except Exception as e:
                 st.error(f"Error reading file: {e}")
                 uploaded_df = None
