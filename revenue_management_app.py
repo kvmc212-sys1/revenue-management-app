@@ -2936,8 +2936,8 @@ elif mode == "Loan Pricing Optimization":
             st.info("Upload a data file or switch to **Manual logistic parameters** to enter Beta0/Beta1 directly.")
     else:
         st.markdown("Enter the logistic regression coefficients directly: **P(Accept) = 1 / (1 + exp(-(Beta0 + Beta1 × APR)))**")
-        beta0_val = st.number_input("Beta0 (intercept)", value=5.0, step=0.1, format="%.3f", key="nomis_b0")
-        beta1_val = st.number_input("Beta1 (APR coefficient, typically negative)", value=-0.75, step=0.01, format="%.4f", key="nomis_b1")
+        beta0_val = st.number_input("Beta0 (intercept)", value=5.4501, step=0.1, format="%.4f", key="nomis_b0")
+        beta1_val = st.number_input("Beta1 (APR coefficient, typically negative)", value=-0.9790, step=0.01, format="%.4f", key="nomis_b1")
 
     st.divider()
 
