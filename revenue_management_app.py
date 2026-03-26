@@ -2902,11 +2902,23 @@ elif mode == "Loan Pricing Optimization":
     **expected net revenue per quote** = P(Accept | APR) × Net Revenue(APR).
     """)
 
+    # --- Additional variables ---
+    st.subheader("Model Specification")
+    include_fico = st.checkbox("Include FICO Score", value=False, key="nomis_fico")
+    include_comp = st.checkbox("Include Competition Rate", value=False, key="nomis_comp")
+    extra_vars = []
+    if include_fico:
+        extra_vars.append("FICO")
+    if include_comp:
+        extra_vars.append("Competition Rate")
+
     # --- Data source ---
     data_source = st.radio("Data source", ["Manual logistic parameters", "Upload Excel / CSV"], horizontal=True, key="nomis_src")
 
     beta0_val = None
     beta1_val = None
+    beta_extra = {}  # {var_name: coefficient}
+    extra_avgs = {}  # {var_name: average value for curve plotting}
     uploaded_df = None
     apr_col_name = "APR"
     accept_col_name = "Accept?"
@@ -2933,11 +2945,16 @@ elif mode == "Loan Pricing Optimization":
                 st.error(f"Error reading file: {e}")
                 uploaded_df = None
         else:
-            st.info("Upload a data file or switch to **Manual logistic parameters** to enter Beta0/Beta1 directly.")
+            st.info("Upload a data file or switch to **Manual logistic parameters** to enter coefficients directly.")
     else:
-        st.markdown("Enter the logistic regression coefficients directly: **P(Accept) = 1 / (1 + exp(-(Beta0 + Beta1 × APR)))**")
+        extra_formula = " + ".join([f"Beta{i+2} × {v}" for i, v in enumerate(extra_vars)])
+        full_formula = f"Beta0 + Beta1 × APR" + (f" + {extra_formula}" if extra_formula else "")
+        st.markdown(f"Enter the logistic regression coefficients directly: **P(Accept) = 1 / (1 + exp(-({full_formula})))**")
         beta0_val = st.number_input("Beta0 (intercept)", value=5.4501, step=0.1, format="%.4f", key="nomis_b0")
         beta1_val = st.number_input("Beta1 (APR coefficient, typically negative)", value=-0.9790, step=0.01, format="%.4f", key="nomis_b1")
+        for idx_ev, ev_name in enumerate(extra_vars):
+            beta_extra[ev_name] = st.number_input(f"Beta{idx_ev+2} ({ev_name} coefficient)", value=0.0, step=0.01, format="%.4f", key=f"nomis_bx_{idx_ev}")
+            extra_avgs[ev_name] = st.number_input(f"Average {ev_name} (for plotting)", value=700.0 if "FICO" in ev_name else 5.0, step=0.1, format="%.2f", key=f"nomis_avg_{idx_ev}")
 
     st.divider()
 
@@ -2969,28 +2986,42 @@ elif mode == "Loan Pricing Optimization":
     if data_source == "Upload Excel / CSV" and uploaded_df is not None:
         try:
             from sklearn.linear_model import LogisticRegression
-            APR_arr = uploaded_df[[apr_col_name]].to_numpy()
-            Accept_arr = uploaded_df[[accept_col_name]].to_numpy().ravel()
+            # Build feature matrix: APR + optional extra variables
+            feature_cols = [apr_col_name] + extra_vars
+            missing_cols = [c for c in extra_vars if c not in uploaded_df.columns]
+            if missing_cols:
+                st.error(f"Columns not found in data: {missing_cols}. Available: {list(uploaded_df.columns)}")
+            else:
+                X_arr = uploaded_df[feature_cols].to_numpy()
+                Accept_arr = uploaded_df[[accept_col_name]].to_numpy().ravel()
 
-            modelLR = LogisticRegression(solver='liblinear', random_state=0)
-            modelLR.fit(APR_arr, Accept_arr)
-            r_sq = modelLR.score(APR_arr, Accept_arr)
+                modelLR = LogisticRegression(solver='liblinear', random_state=0)
+                modelLR.fit(X_arr, Accept_arr)
+                r_sq = modelLR.score(X_arr, Accept_arr)
 
-            beta0_val = modelLR.intercept_[0]
-            beta1_val = modelLR.coef_[0, 0]
-            run_ok = True
+                beta0_val = modelLR.intercept_[0]
+                beta1_val = modelLR.coef_[0, 0]
+                for idx_ev, ev_name in enumerate(extra_vars):
+                    beta_extra[ev_name] = modelLR.coef_[0, idx_ev + 1]
+                    extra_avgs[ev_name] = uploaded_df[ev_name].mean()
+                run_ok = True
 
-            st.subheader("Logistic Regression Results")
-            col_lr1, col_lr2, col_lr3 = st.columns(3)
-            with col_lr1:
-                st.metric("Beta0 (intercept)", f"{beta0_val:.4f}")
-                st.caption("Baseline log-odds of acceptance when APR = 0.")
-            with col_lr2:
-                st.metric("Beta1 (APR coeff)", f"{beta1_val:.4f}")
-                st.caption("Change in log-odds per 1% increase in APR. Negative means higher APR reduces acceptance.")
-            with col_lr3:
-                st.metric("Classification Accuracy", f"{r_sq:.4f}")
-                st.caption("Fraction of correctly predicted Accept/Reject decisions on training data.")
+                st.subheader("Logistic Regression Results")
+                n_coefs = 2 + len(extra_vars)
+                lr_cols = st.columns(min(n_coefs + 1, 5))
+                with lr_cols[0]:
+                    st.metric("Beta0 (intercept)", f"{beta0_val:.4f}")
+                    st.caption("Baseline log-odds of acceptance.")
+                with lr_cols[1]:
+                    st.metric("Beta1 (APR)", f"{beta1_val:.4f}")
+                    st.caption("Change in log-odds per 1% APR increase.")
+                for idx_ev, ev_name in enumerate(extra_vars):
+                    with lr_cols[2 + idx_ev]:
+                        st.metric(f"Beta{idx_ev+2} ({ev_name})", f"{beta_extra[ev_name]:.4f}")
+                        st.caption(f"Effect of {ev_name} on log-odds of acceptance.")
+                with lr_cols[min(n_coefs, 4)]:
+                    st.metric("Classification Accuracy", f"{r_sq:.4f}")
+                    st.caption("Fraction of correctly predicted Accept/Reject decisions on training data.")
 
         except ImportError:
             st.error("scikit-learn is required. Run: `pip install scikit-learn`")
@@ -3002,7 +3033,10 @@ elif mode == "Loan Pricing Optimization":
     if run_ok and beta0_val is not None and beta1_val is not None:
         # --- Compute curves ---
         x_apr = np.linspace(apr_min, apr_max, 500)
-        prob_accept = expit(beta0_val + beta1_val * x_apr)
+        # Log-odds: Beta0 + Beta1*APR + sum(Beta_k * avg_k) for extra vars
+        extra_contribution = sum(beta_extra.get(v, 0) * extra_avgs.get(v, 0) for v in extra_vars)
+        logodds = beta0_val + beta1_val * x_apr + extra_contribution
+        prob_accept = expit(logodds)
 
         cost_per_month = monthly_payment(cost_funds_rate, loan_amount, term_months)
         revenue_per_month = np.array([monthly_payment(a, loan_amount, term_months) for a in x_apr])
@@ -3019,6 +3053,9 @@ elif mode == "Loan Pricing Optimization":
 
         st.divider()
         st.subheader("Optimization Results")
+        if extra_vars:
+            avg_note = ", ".join([f"{v}={extra_avgs[v]:.2f}" for v in extra_vars])
+            st.caption(f"Curves computed at average values: {avg_note}")
         col_r1, col_r2, col_r3, col_r4 = st.columns(4)
         with col_r1:
             st.metric("Optimal APR", f"{opt_apr:.2f}%")
@@ -3040,6 +3077,32 @@ elif mode == "Loan Pricing Optimization":
         with col_r6:
             st.metric("Cost of Funds (monthly)", fmt_dollar(cost_per_month))
             st.caption("The lender's monthly cost of funds — what it costs to finance the loan.")
+
+        # --- Segmented analysis by extra variables ---
+        if extra_vars and data_source == "Upload Excel / CSV" and uploaded_df is not None:
+            st.divider()
+            st.subheader("Segmented Analysis")
+            for ev_name in extra_vars:
+                st.markdown(f"**Optimal APR by {ev_name} level** (other variables at average)")
+                ev_data = uploaded_df[ev_name]
+                levels = {
+                    "Low (P25)": ev_data.quantile(0.25),
+                    "Med (P50)": ev_data.quantile(0.50),
+                    "High (P75)": ev_data.quantile(0.75),
+                }
+                seg_cols = st.columns(len(levels))
+                for idx_lv, (lv_label, lv_val) in enumerate(levels.items()):
+                    # Recompute P(Accept) with this level replacing the average
+                    other_contrib = sum(beta_extra.get(v, 0) * extra_avgs.get(v, 0) for v in extra_vars if v != ev_name)
+                    lo_seg = beta0_val + beta1_val * x_apr + beta_extra[ev_name] * lv_val + other_contrib
+                    pa_seg = expit(lo_seg)
+                    enr_seg = pa_seg * net_revenue
+                    seg_idx = np.argmax(enr_seg)
+                    with seg_cols[idx_lv]:
+                        st.metric(f"{lv_label}", f"{ev_name}={lv_val:.2f}")
+                        st.metric("Optimal APR", f"{x_apr[seg_idx]:.2f}%")
+                        st.metric("Max E[Net Rev]", fmt_dollar(enr_seg[seg_idx]))
+                        st.caption(f"P(Accept)={pa_seg[seg_idx]:.3f} at this {ev_name} level.")
 
         # --- Chart 1: P(Accept) and Net Revenue vs APR (dual axis) ---
         st.divider()
@@ -3134,14 +3197,20 @@ elif mode == "Loan Pricing Optimization":
             st.plotly_chart(fig3, use_container_width=True)
 
         # --- Python printout ---
+        extra_formula_str = "".join([f" + {beta_extra.get(v,0):.4f}*{v.replace(' ','_')}" for v in extra_vars])
         _code_nomis = [
             f"from sklearn.linear_model import LogisticRegression",
             f"from scipy.special import expit",
             f"import numpy as np",
             f"",
-            f"# Logistic regression: P(Accept) = expit(Beta0 + Beta1 * APR)",
+            f"# Logistic regression: P(Accept) = expit(Beta0 + Beta1*APR{' + ...' if extra_vars else ''})",
             f"Beta0 = {beta0_val:.4f}",
             f"Beta1 = {beta1_val:.4f}",
+        ]
+        for ev_name in extra_vars:
+            _code_nomis.append(f"Beta_{ev_name.replace(' ','_')} = {beta_extra[ev_name]:.4f}")
+            _code_nomis.append(f"avg_{ev_name.replace(' ','_')} = {extra_avgs[ev_name]:.4f}")
+        _code_nomis += [
             f"",
             f"# Loan parameters",
             f"loan_amount = {loan_amount}",
@@ -3156,7 +3225,8 @@ elif mode == "Loan Pricing Optimization":
             f"",
             f"# Expected net revenue = P(Accept|APR) * (payment(APR) - cost)",
             f"apr_range = np.linspace({apr_min}, {apr_max}, 500)",
-            f"exp_net_rev = expit({beta0_val:.4f} + {beta1_val:.4f} * apr_range) * (monthly_payment(apr_range, {loan_amount}, {term_months}) - cost)",
+            f"logodds = {beta0_val:.4f} + {beta1_val:.4f} * apr_range{extra_formula_str}",
+            f"exp_net_rev = expit(logodds) * (monthly_payment(apr_range, {loan_amount}, {term_months}) - cost)",
             f"opt_idx = np.argmax(exp_net_rev)",
         ]
         _results_nomis = [
@@ -3164,7 +3234,11 @@ elif mode == "Loan Pricing Optimization":
             f"Loan Pricing Optimization (Nomis)",
             f"{'='*55}",
             f"Beta0:              {beta0_val:.4f}",
-            f"Beta1:              {beta1_val:.4f}",
+            f"Beta1 (APR):        {beta1_val:.4f}",
+        ]
+        for ev_name in extra_vars:
+            _results_nomis.append(f"Beta ({ev_name}): {beta_extra[ev_name]:.4f}  (avg={extra_avgs[ev_name]:.2f})")
+        _results_nomis += [
             f"{'─'*55}",
             f"Optimal APR:        {opt_apr:.2f}%",
             f"P(Accept):          {opt_prob:.4f}",
